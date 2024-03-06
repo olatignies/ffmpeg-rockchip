@@ -136,6 +136,26 @@ static av_cold int rkmpp_decode_close(AVCodecContext *avctx)
     return 0;
 }
 
+static int rkmpp_send_extradata(AVCodecContext *avctx)
+{
+    RKMPPDecContext *r = avctx->priv_data;
+    MppPacket mpp_pkt = NULL;
+    int ret;
+
+    if (avctx->extradata_size && avctx->codec_id != AV_CODEC_ID_AV1) {
+        ret = mpp_packet_init(&mpp_pkt, avctx->extradata, avctx->extradata_size);
+        if (ret != MPP_OK)
+            return AVERROR_EXTERNAL;
+
+        ret = r->mapi->decode_put_packet(r->mctx, mpp_pkt);
+        mpp_packet_deinit(&mpp_pkt);
+        if (ret != MPP_OK)
+            return AVERROR_EXTERNAL;
+    }
+
+    return 0;
+}
+
 static av_cold int rkmpp_decode_init(AVCodecContext *avctx)
 {
     RKMPPDecContext *r = avctx->priv_data;
@@ -257,6 +277,11 @@ static av_cold int rkmpp_decode_init(AVCodecContext *avctx)
                    avcodec_get_name(avctx->codec_id));
             r->afbc = 0;
         }
+    }
+
+    if ((ret = rkmpp_send_extradata(avctx)) < 0) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to send extradata to MPP\n");
+        goto fail;
     }
 
     if (avctx->hw_device_ctx) {
@@ -934,6 +959,9 @@ static void rkmpp_decode_flush(AVCodecContext *avctx)
         av_packet_unref(&r->last_pkt);
     } else
         av_log(avctx, AV_LOG_ERROR, "Failed to reset MPP context: %d\n", ret);
+
+    if ((ret = rkmpp_send_extradata(avctx)) < 0)
+        av_log(avctx, AV_LOG_ERROR, "Failed to send extradata to MPP\n");
 }
 
 #if CONFIG_H263_RKMPP_DECODER
