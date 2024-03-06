@@ -673,7 +673,7 @@ static int rkmpp_get_frame(AVCodecContext *avctx, AVFrame *frame, int timeout)
     MppFrame mpp_frame = NULL;
     int ret;
 
-    /* should not provide ant frame after EOS */
+    /* should not provide any frame after EOS */
     if (r->eof)
         return AVERROR_EOF;
 
@@ -896,39 +896,50 @@ static int rkmpp_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame)
         return AVERROR_EOF;
 
     /* drain remain frames */
-    if (r->draining)
-        return rkmpp_get_frame(avctx, frame, MPP_TIMEOUT_BLOCK);
+    if (r->draining) {
+        ret = rkmpp_get_frame(avctx, frame, MPP_TIMEOUT_BLOCK);
+        goto exit;
+    }
 
     while (1) {
         if (!pkt->size) {
             ret = ff_decode_get_packet(avctx, pkt);
             if (ret == AVERROR_EOF) {
-                av_log(avctx, AV_LOG_DEBUG, "End of stream\n");
+                av_log(avctx, AV_LOG_DEBUG, "Decoder is at EOF\n");
                 /* send EOS and start draining */
                 rkmpp_send_eos(avctx);
-                return rkmpp_get_frame(avctx, frame, MPP_TIMEOUT_BLOCK);
+                ret = rkmpp_get_frame(avctx, frame, MPP_TIMEOUT_BLOCK);
+                goto exit;
             } else if (ret == AVERROR(EAGAIN)) {
                 /* not blocking so that we can feed data ASAP */
-                return rkmpp_get_frame(avctx, frame, MPP_TIMEOUT_NON_BLOCK);
+                ret = rkmpp_get_frame(avctx, frame, MPP_TIMEOUT_NON_BLOCK);
+                goto exit;
             } else if (ret < 0) {
-                av_log(avctx, AV_LOG_ERROR, "Failed to get packet: %d\n", ret);
-                return ret;
+                av_log(avctx, AV_LOG_ERROR, "Decoder failed to get packet: %d\n", ret);
+                goto exit;
             }
         } else {
             /* send pending data to decoder */
             ret = rkmpp_send_packet(avctx, pkt);
             if (ret == AVERROR(EAGAIN)) {
-                /* some clients don't like getting EAGAIN in both of in and out */
-                return rkmpp_get_frame(avctx, frame, MPP_TIMEOUT_BLOCK);
+                /* some streams might need more packets to start returning frames */
+                ret = rkmpp_get_frame(avctx, frame, 100);
+                if (ret != AVERROR(EAGAIN))
+                    goto exit;
             } else if (ret < 0) {
-                av_log(avctx, AV_LOG_ERROR, "Failed to send packet: %d\n", ret);
-                return ret;
+                av_log(avctx, AV_LOG_ERROR, "Decoder failed to send packet: %d\n", ret);
+                goto exit;
             } else {
                 av_packet_unref(pkt);
                 pkt->size = 0;
             }
         }
     }
+
+exit:
+    if (r->draining && ret == AVERROR(EAGAIN))
+        ret = AVERROR_EOF;
+    return ret;
 }
 
 static void rkmpp_decode_flush(AVCodecContext *avctx)
